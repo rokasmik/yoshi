@@ -5,7 +5,13 @@ process.env.NODE_ENV = 'development';
 const parseArgs = require('minimist');
 
 const cliArgs = parseArgs(process.argv.slice(2), {
+  alias: {
+    https: 'ssl',
+  },
   boolean: ['with-tests'],
+  default: {
+    https: false,
+  },
 });
 
 if (cliArgs.production) {
@@ -22,11 +28,11 @@ const {
   clientFilesPath,
   servers,
   entry,
-  defaultEntry,
   hmr,
   liveReload,
   petriSpecsConfig,
   clientProjectName,
+  startUrl,
 } = require('yoshi-config');
 const globs = require('yoshi-config/globs');
 const {
@@ -35,6 +41,7 @@ const {
   shouldRunSass,
   isProduction,
 } = require('yoshi-helpers/queries');
+const { defaultEntry } = require('yoshi-helpers/constants');
 const {
   shouldTransformHMRRuntime,
   suffix,
@@ -43,7 +50,7 @@ const {
 } = require('yoshi-helpers/utils');
 const { debounce } = require('lodash');
 const wixAppServer = require('../tasks/app-server');
-const openBrowser = require('react-dev-utils/openBrowser');
+const openBrowser = require('./utils/open-browser');
 
 const runner = createRunner({
   logger: new LoggerPlugin(),
@@ -61,8 +68,6 @@ module.exports = runner.command(
 
     const wixCdn = tasks[require.resolve('../tasks/cdn')];
     const babel = tasks[require.resolve('../tasks/babel')];
-    const migrateScopePackages =
-      tasks[require.resolve('../tasks/migrate-to-scoped-packages')];
     const wixPetriSpecs = tasks[require.resolve('../tasks/petri-specs')];
     const wixMavenStatics = tasks[require.resolve('../tasks/maven-statics')];
 
@@ -71,24 +76,15 @@ module.exports = runner.command(
         return;
       }
 
-      return wixAppServer(
-        {
-          entryPoint,
-          debugPort,
-          debugBrkPort,
-          manualRestart: cliArgs['manual-restart'],
-        },
-        { title: 'app-server' },
-      );
+      return wixAppServer({
+        entryPoint,
+        debugPort,
+        debugBrkPort,
+        manualRestart: cliArgs['manual-restart'],
+      });
     };
 
-    await Promise.all([
-      clean({ pattern: `{dist,target}/*` }),
-      migrateScopePackages(
-        {},
-        { title: 'scope-packages-migration', log: false },
-      ),
-    ]);
+    await clean({ pattern: `{dist,target}/*` });
 
     const ssl = cliArgs.ssl || servers.cdn.ssl;
 
@@ -98,9 +94,9 @@ module.exports = runner.command(
       copy(
         {
           pattern: [
-            `${globs.base}/assets/**/*`,
-            `${globs.base}/**/*.{ejs,html,vm}`,
-            `${globs.base}/**/*.{css,json,d.ts}`,
+            ...globs.baseDirs.map(dir => `${dir}/assets/**/*`),
+            ...globs.baseDirs.map(dir => `${dir}/**/*.{ejs,html,vm}`),
+            ...globs.baseDirs.map(dir => `${dir}/**/*.{css,json,d.ts}`),
           ],
           target: 'dist',
         },
@@ -109,8 +105,10 @@ module.exports = runner.command(
       copy(
         {
           pattern: [
-            `${globs.assetsLegacyBase}/assets/**/*`,
-            `${globs.assetsLegacyBase}/**/*.{ejs,html,vm}`,
+            ...globs.assetsLegacyBaseDirs.map(dir => `${dir}/assets/**/*`),
+            ...globs.assetsLegacyBaseDirs.map(
+              dir => `${dir}/**/*.{ejs,html,vm}`,
+            ),
           ],
           target: 'dist/statics',
         },
@@ -155,7 +153,11 @@ module.exports = runner.command(
       ),
     ]);
 
-    openBrowser(cliArgs.url || localUrlForBrowser);
+    const urlToOpen = cliArgs.url || startUrl || localUrlForBrowser;
+
+    if (urlToOpen) {
+      openBrowser(urlToOpen);
+    }
 
     if (shouldRunTests && !isProduction()) {
       crossSpawn('npm', ['test', '--silent'], {
@@ -170,9 +172,9 @@ module.exports = runner.command(
     watch(
       {
         pattern: [
-          `${globs.base}/assets/**/*`,
-          `${globs.base}/**/*.{ejs,html,vm}`,
-          `${globs.base}/**/*.{css,json,d.ts}`,
+          ...globs.baseDirs.map(dir => `${dir}/assets/**/*`),
+          ...globs.baseDirs.map(dir => `${dir}/**/*.{ejs,html,vm}`),
+          ...globs.baseDirs.map(dir => `${dir}/**/*.{css,json,d.ts}`),
         ],
       },
       changed => copy({ pattern: changed, target: 'dist' }),
@@ -181,8 +183,8 @@ module.exports = runner.command(
     watch(
       {
         pattern: [
-          `${globs.assetsLegacyBase}/assets/**/*`,
-          `${globs.assetsLegacyBase}/**/*.{ejs,html,vm}`,
+          ...globs.assetsLegacyBaseDirs.map(dir => `${dir}/assets/**/*`),
+          ...globs.assetsLegacyBaseDirs.map(dir => `${dir}/**/*.{ejs,html,vm}`),
         ],
       },
       changed => copy({ pattern: changed, target: 'dist/statics' }),
@@ -272,23 +274,20 @@ module.exports = runner.command(
         target: 'dist',
       };
 
-      watch(
-        { pattern: [path.join(globs.base, '**', '*.js{,x}'), 'index.js'] },
-        async changed => {
-          await babel(
-            {
-              pattern: changed,
-              ...babelConfig,
-            },
-            { title: 'babel' },
-          );
-          return appServer();
-        },
-      );
+      watch({ pattern: globs.babel }, async changed => {
+        await babel(
+          {
+            pattern: changed,
+            ...babelConfig,
+          },
+          { title: 'babel' },
+        );
+        return appServer();
+      });
 
       await babel(
         {
-          pattern: [path.join(globs.base, '**', '*.js{,x}'), 'index.js'],
+          pattern: globs.babel,
           ...babelConfig,
         },
         { title: 'babel' },

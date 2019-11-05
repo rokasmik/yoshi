@@ -2,12 +2,11 @@ const chalk = require('chalk');
 const stream = require('stream');
 const waitPort = require('wait-port');
 const child_process = require('child_process');
+const fs = require('fs-extra');
+const rootApp = require('yoshi-config/root-app');
+const SocketServer = require('./socket-server');
 const { PORT } = require('./constants');
 const { getDevelopmentEnvVars } = require('yoshi-helpers/bootstrap-utils');
-
-const bootstrapEnvironmentParams = getDevelopmentEnvVars({
-  port: PORT,
-});
 
 function serverLogPrefixer() {
   return new stream.Transform({
@@ -20,12 +19,22 @@ function serverLogPrefixer() {
 
 const inspectArg = process.argv.find(arg => arg.includes('--debug'));
 
-module.exports = class Server {
-  constructor({ serverFilePath }) {
+module.exports = class ServerProcess {
+  constructor({ app = rootApp, serverFilePath, hmrPort }) {
+    this.app = app;
+    this.hmrPort = hmrPort;
+    this.socketServer = new SocketServer({ hmrPort });
     this.serverFilePath = serverFilePath;
   }
 
   async initialize() {
+    await this.socketServer.initialize();
+
+    const bootstrapEnvironmentParams = getDevelopmentEnvVars({
+      app: this.app,
+      port: PORT,
+    });
+
     this.child = child_process.fork(this.serverFilePath, {
       stdio: 'pipe',
       execArgv: [inspectArg]
@@ -35,14 +44,21 @@ module.exports = class Server {
         ...process.env,
         NODE_ENV: 'development',
         PORT,
+        HMR_PORT: this.hmrPort,
         ...bootstrapEnvironmentParams,
       },
     });
 
-    this.child.stdout.pipe(serverLogPrefixer()).pipe(process.stdout);
-    this.child.stderr.pipe(serverLogPrefixer()).pipe(process.stderr);
+    const serverLogWriteStream = fs.createWriteStream(this.app.SERVER_LOG_FILE);
+    const serverOutLogStream = this.child.stdout.pipe(serverLogPrefixer());
+    serverOutLogStream.pipe(serverLogWriteStream);
+    serverOutLogStream.pipe(process.stdout);
 
-    this.child.on('message', this.onMessage.bind(this));
+    const serverErrorLogStream = this.child.stderr.pipe(serverLogPrefixer());
+    serverErrorLogStream.pipe(serverLogWriteStream);
+    serverErrorLogStream.pipe(process.stderr);
+
+    this.socketServer.on('message', this.onMessage.bind(this));
 
     await waitPort({
       port: PORT,
@@ -60,7 +76,7 @@ module.exports = class Server {
   }
 
   send(message) {
-    this.child.send(message);
+    this.socketServer.send(message);
 
     return new Promise((resolve, reject) => {
       this._resolve = resolve;

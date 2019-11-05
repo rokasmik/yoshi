@@ -85,7 +85,7 @@ describe('Aggregator: Lint', () => {
         .execute('lint', ['--format json']);
 
       expect(res.code).to.equal(1);
-      // endPoisition is a json only parameter
+      // endPosition is a json only parameter
       expect(res.stdout).to.contain('endPosition');
       expect(res.stdout).to.contain('Missing radix parameter');
     });
@@ -242,6 +242,18 @@ describe('Aggregator: Lint', () => {
       expect(res.stderr).to.contain('app/a.js');
       expect(res.stderr).to.contain('Missing radix parameter');
       expect(res.stderr).to.contain('app/b.js');
+    });
+
+    it('should run eslint if using typescript but no tslint config file', () => {
+      const res = setup({
+        'app/a.ts': `parseInt("1");`,
+        'not-in-glob/b.ts': 'parseInt("1");',
+        'package.json': fx.packageJson(),
+        'tsconfig.json': fx.tsconfig({ files: ['app/a.ts'] }),
+      }).execute('lint');
+      console.log(res.stdout);
+      expect(res.code).to.equal(1);
+      expect(res.stderr).to.contain('Missing radix parameter  radix');
     });
   });
 

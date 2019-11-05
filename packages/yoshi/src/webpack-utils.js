@@ -1,18 +1,26 @@
+const path = require('path');
 const cors = require('cors');
+const fs = require('fs-extra');
 const chalk = require('chalk');
 const webpack = require('webpack');
+const globby = require('globby');
 const clearConsole = require('react-dev-utils/clearConsole');
 const { prepareUrls } = require('react-dev-utils/WebpackDevServerUtils');
 const formatWebpackMessages = require('react-dev-utils/formatWebpackMessages');
-const project = require('yoshi-config');
-const { STATICS_DIR } = require('yoshi-config/paths');
+const rootApp = require('yoshi-config/root-app');
 const { PORT } = require('./constants');
 const { redirectMiddleware } = require('../src/tasks/cdn/server-api');
 const WebpackDevServer = require('webpack-dev-server');
+const Watchpack = require('watchpack');
+const { shouldDeployToCDN, inTeamCity } = require('yoshi-helpers/queries');
+const { getProjectCDNBasePath } = require('yoshi-helpers/utils');
+
+const isDevelopment = process.env.NODE_ENV === 'development';
 
 const isInteractive = process.stdout.isTTY;
+const possibleServerEntries = ['./server', '../dev/server'];
 
-function createCompiler(config, { https }) {
+function createCompiler(app, config, { https }) {
   let compiler;
 
   try {
@@ -48,7 +56,7 @@ function createCompiler(config, { https }) {
         const devServerUrls = prepareUrls(
           https ? 'https' : 'http',
           '0.0.0.0',
-          project.servers.cdn.port,
+          app.servers.cdn.port,
         );
 
         console.log();
@@ -119,20 +127,26 @@ function createCompiler(config, { https }) {
   return compiler;
 }
 
-function addEntry(config, hotEntries) {
+function addEntry(entry, hotEntries) {
   let newEntry = {};
 
-  if (!Array.isArray(config.entry) && typeof config.entry === 'object') {
-    const keys = Object.keys(config.entry);
+  if (typeof entry === 'function') {
+    const originalEntry = entry;
+
+    newEntry = async () => {
+      return addEntry(await originalEntry(), hotEntries);
+    };
+  } else if (!Array.isArray(entry) && typeof entry === 'object') {
+    const keys = Object.keys(entry);
 
     for (const entryName of keys) {
-      newEntry[entryName] = hotEntries.concat(config.entry[entryName]);
+      newEntry[entryName] = hotEntries.concat(entry[entryName]);
     }
   } else {
-    newEntry = hotEntries.concat(config.entry);
+    newEntry = hotEntries.concat(entry);
   }
 
-  config.entry = newEntry;
+  return newEntry;
 }
 
 function overrideRules(rules, patch) {
@@ -151,12 +165,15 @@ function overrideRules(rules, patch) {
   });
 }
 
-function createDevServer(clientCompiler, { publicPath, https, host }) {
+function createDevServer(
+  clientCompiler,
+  { publicPath, https, host, app = rootApp },
+) {
   const devServer = new WebpackDevServer(clientCompiler, {
     // Enable gzip compression for everything served
     compress: true,
     clientLogLevel: 'error',
-    contentBase: STATICS_DIR,
+    contentBase: app.STATICS_DIR,
     watchContentBase: true,
     hot: true,
     publicPath,
@@ -167,12 +184,17 @@ function createDevServer(clientCompiler, { publicPath, https, host }) {
     host,
     overlay: true,
     // https://github.com/wix/yoshi/pull/1191
-    allowedHosts: ['.wix.com'],
-    before(app) {
+    allowedHosts: [
+      '.wix.com',
+      '.wixsite.com',
+      '.ooidev.com',
+      '.deviantart.lan',
+    ],
+    before(expressApp) {
       // Send cross origin headers
-      app.use(cors());
+      expressApp.use(cors());
       // Redirect `.min.(js|css)` to `.(js|css)`
-      app.use(redirectMiddleware(host, project.servers.cdn.port));
+      expressApp.use(redirectMiddleware(host, app.servers.cdn.port));
     },
   });
 
@@ -193,10 +215,90 @@ function waitForCompilation(compiler) {
   });
 }
 
+function createServerEntries(context, app) {
+  const serverFunctions = fs.pathExistsSync(app.SRC_DIR)
+    ? globby.sync('**/*.api.(js|ts)', { cwd: app.SRC_DIR, absolute: true })
+    : [];
+
+  const serverRoutes = fs.pathExistsSync(app.ROUTES_DIR)
+    ? globby.sync('**/*.(js|ts)', { cwd: app.ROUTES_DIR, absolute: true })
+    : [];
+
+  // Normalize to an object with short entry names
+  const entries = [...serverFunctions, ...serverRoutes].reduce(
+    (acc, filepath) => {
+      return {
+        ...acc,
+        [path.relative(context, filepath).replace(/\.[^/.]+$/, '')]: filepath,
+      };
+    },
+    {},
+  );
+
+  // Add custom entries for `yoshi-server`
+  entries['routes/_api_'] = 'yoshi-server/build/routes/api';
+
+  return entries;
+}
+
+function watchDynamicEntries(watching, app) {
+  const wp = new Watchpack();
+
+  wp.on('aggregated', () => {
+    watching.invalidate();
+  });
+
+  wp.watch([], [app.SRC_DIR, app.ROUTES_DIR]);
+}
+
+const exists = (app, extensions) => entry => {
+  return (
+    globby.sync(`${entry}(${extensions.join('|')})`, {
+      cwd: app.SRC_DIR,
+    }).length > 0
+  );
+};
+
+function validateServerEntry(app, extensions) {
+  const serverEntry = possibleServerEntries.find(exists(app, extensions));
+
+  if (!serverEntry && !app.yoshiServer) {
+    throw new Error(
+      `We couldn't find your server entry. Please use one of the defaults:
+          - "src/server": for a fullstack project
+          - "dev/server": for a client only project`,
+    );
+  }
+  return serverEntry;
+}
+
+function calculatePublicPath(app) {
+  // default public path
+  let publicPath = '/';
+
+  if (!inTeamCity() || isDevelopment) {
+    // When on local machine or on dev environment,
+    // set the local dev-server url as the public path
+    publicPath = app.servers.cdn.url;
+  }
+
+  // In case we are running in CI and there is a pom.xml file, change the public path according to the path on the cdn
+  // The path is created using artifactName from pom.xml and artifact version from an environment param.
+  if (shouldDeployToCDN(rootApp)) {
+    publicPath = getProjectCDNBasePath();
+  }
+
+  return publicPath;
+}
+
 module.exports = {
   createDevServer,
   createCompiler,
   waitForCompilation,
   addEntry,
   overrideRules,
+  createServerEntries,
+  watchDynamicEntries,
+  validateServerEntry,
+  calculatePublicPath,
 };

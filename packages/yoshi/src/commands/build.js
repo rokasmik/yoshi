@@ -7,7 +7,7 @@ const parseArgs = require('minimist');
 const LoggerPlugin = require('../plugins/haste-plugin-yoshi-logger');
 const globs = require('yoshi-config/globs');
 const path = require('path');
-const { STATS_FILE } = require('yoshi-config/paths');
+const rootApp = require('yoshi-config/root-app');
 const {
   petriSpecsConfig,
   clientProjectName,
@@ -40,8 +40,6 @@ module.exports = runner.command(
 
     const { less, clean, copy, sass, webpack, typescript } = tasks;
 
-    const migrateScopePackages =
-      tasks[require.resolve('../tasks/migrate-to-scoped-packages')];
     const babel = tasks[require.resolve('../tasks/babel')];
     const wixPetriSpecs = tasks[require.resolve('../tasks/petri-specs')];
     const wixMavenStatics = tasks[require.resolve('../tasks/maven-statics')];
@@ -50,10 +48,6 @@ module.exports = runner.command(
 
     await Promise.all([
       clean({ pattern: `{dist,target}/*` }),
-      migrateScopePackages(
-        {},
-        { title: 'scope-packages-migration', log: false },
-      ),
       printAndExitOnErrors(() =>
         wixDepCheck({}, { title: 'dep-check', log: false }),
       ),
@@ -103,7 +97,7 @@ module.exports = runner.command(
             {
               ...defaultOptions,
               callbackPath: productionCallbackPath,
-              statsFilename: cliArgs.stats ? STATS_FILE : false,
+              statsFilename: cliArgs.stats ? rootApp.STATS_FILE : false,
               configParams: {
                 isDebug: false,
                 isAnalyze: cliArgs.analyze,
@@ -146,9 +140,9 @@ module.exports = runner.command(
       return copy(
         {
           pattern: [
-            `${globs.base}/assets/**/*`,
-            `${globs.base}/**/*.{ejs,html,vm}`,
-            `${globs.base}/**/*.{css,json,d.ts}`,
+            ...globs.baseDirs.map(dir => `${dir}/assets/**/*`),
+            ...globs.baseDirs.map(dir => `${dir}/**/*.{ejs,html,vm}`),
+            ...globs.baseDirs.map(dir => `${dir}/**/*.{css,json,d.ts}`),
           ],
           target: globs.dist({ esTarget }),
         },
@@ -160,8 +154,10 @@ module.exports = runner.command(
       return copy(
         {
           pattern: [
-            `${globs.assetsLegacyBase}/assets/**/*`,
-            `${globs.assetsLegacyBase}/**/*.{ejs,html,vm}`,
+            ...globs.assetsLegacyBaseDirs.map(dir => `${dir}/assets/**/*`),
+            ...globs.assetsLegacyBaseDirs.map(
+              dir => `${dir}/**/*.{ejs,html,vm}`,
+            ),
           ],
           target: 'dist/statics',
         },
@@ -230,7 +226,9 @@ module.exports = runner.command(
       if (isAngularProject) {
         return ngAnnotate(
           {
-            pattern: path.join(globs.dist(), globs.base, '**', '*.js'),
+            pattern: globs.baseDirs.map(dir =>
+              path.join(globs.dist(), dir, '**', '*.js'),
+            ),
             target: './',
           },
           { title: 'ng-annotate' },

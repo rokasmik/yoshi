@@ -15,11 +15,14 @@ const {
 const { setupRequireHooks } = require('yoshi-helpers/require-hooks');
 const startRewriteForwardProxy = require('yoshi-helpers/rewrite-forward-proxy');
 const globs = require('yoshi-config/globs');
-const project = require('yoshi-config');
+const rootApp = require('yoshi-config/root-app');
 
 setupRequireHooks();
 
-const userConfPath = path.resolve('protractor.conf.js');
+const userConfPath = process.env.YOSHI_PROTRACTOR_CONFIG
+  ? path.resolve(process.env.YOSHI_PROTRACTOR_CONFIG)
+  : path.resolve('protractor.conf.js');
+
 const userConf = exists(userConfPath) ? require(userConfPath).config : null;
 
 const shouldUseProtractorBrowserLogs =
@@ -33,11 +36,11 @@ const forwardProxyPort = process.env.FORWARD_PROXY_PORT || 3333;
 const merged = ld.mergeWith(
   {
     framework: 'jasmine',
-    specs: [globs.e2eTests],
+    specs: globs.e2eTests,
     exclude: [],
     directConnect: true,
 
-    ...(shouldDeployToCDN() && {
+    ...(shouldDeployToCDN(rootApp) && {
       capabilities: {
         browserName: 'chrome',
         chromeOptions: {
@@ -62,10 +65,10 @@ const merged = ld.mergeWith(
           }).css,
       });
 
-      if (shouldDeployToCDN()) {
+      if (shouldDeployToCDN(rootApp)) {
         startRewriteForwardProxy({
           search: getProjectCDNBasePath(),
-          rewrite: project.servers.cdn.url,
+          rewrite: rootApp.servers.cdn.url,
           port: forwardProxyPort,
         });
       }

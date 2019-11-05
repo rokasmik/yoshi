@@ -82,7 +82,7 @@ describe('output', () => {
     }
   });
 
-  it("fails when client entry doesn't exist", async () => {
+  it('fails when client entry does not exist', async () => {
     expect.assertions(1);
 
     await fs.remove(originalFilePath);
@@ -96,7 +96,7 @@ describe('output', () => {
     }
   });
 
-  it("fails when server entry doesn't exist", async () => {
+  it('fails when server entry does not exist', async () => {
     expect.assertions(1);
 
     await fs.remove(originalServerFilePath);
@@ -104,9 +104,7 @@ describe('output', () => {
     try {
       await global.scripts.build();
     } catch (error) {
-      expect(error.stderr).toMatch(
-        "(server) Entry module not found: Error: Can't resolve './server'",
-      );
+      expect(error.stderr).toMatch("We couldn't find your server entry");
     }
   });
 });

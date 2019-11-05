@@ -1,9 +1,7 @@
-const path = require('path');
 const bootstrap = require('@wix/wix-bootstrap-ng');
 
-const src = process.env.SRC_PATH || path.join('.', 'dist', 'src');
-const server = path.join(src, 'server');
-
 bootstrap()
-  .express(server)
-  .start({ disableCluster: process.env.NODE_ENV === 'development' });
+  // https://github.com/wix-platform/wix-node-platform/tree/master/bootstrap/wix-bootstrap-ng#wixbootstrapngconfigfileexportingfunction-this
+  .config('dist/src/config')
+  .express('dist/src/server')
+  .start();

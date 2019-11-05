@@ -6,80 +6,24 @@ const fs = require('fs-extra');
 const path = require('path');
 const tempy = require('tempy');
 const chalk = require('chalk');
+const map = require('lodash/map');
+const reverse = require('lodash/reverse');
+const sortBy = require('lodash/sortBy');
 const prompts = require('prompts');
 const chokidar = require('chokidar');
 const clipboardy = require('clipboardy');
-const {
-  runPrompt,
-  generateProject,
-  replaceTemplates,
-  getValuesMap,
-} = require('../src/index');
-const { clearConsole } = require('../src/utils');
-const cache = require('./cache');
-const TemplateModel = require('../src/TemplateModel');
+const { replaceTemplates, getValuesMap } = require('../src/index');
 const { appCacheKey } = require('../src/constants');
-
-async function shouldContinueOldSession(templateTitle) {
-  const response = await prompts({
-    type: 'confirm',
-    name: 'value',
-    message: `we've found an old session when you worked on a ${chalk.magenta(
-      templateTitle,
-    )} template.\n\n Answer ${chalk.cyan(
-      'Yes',
-    )} if you would like to continue working on it, or ${chalk.cyan(
-      'No',
-    )} to start a new session`,
-    initial: true,
-  });
-
-  return response.value;
-}
-
-async function createApp({ cacheData, useCache }) {
-  clearConsole();
-  let templateModel;
-
-  if (useCache) {
-    templateModel = cacheData.templateModel;
-  } else {
-    templateModel = await runPrompt();
-
-    clearConsole();
-  }
-
-  const workingDir = useCache
-    ? cacheData.workingDir
-    : path.join(tempy.directory(), `generated-${templateModel.getTitle()}`);
-
-  fs.ensureDirSync(workingDir);
-
-  generateProject(templateModel, workingDir);
-  // install(workingDir);
-  // lintFix(workingDir);
-
-  cache.set(appCacheKey, {
-    templateModel: templateModel,
-    workingDir,
-  });
-
-  console.log();
-
-  if (useCache) {
-    console.log(`continue working on ${chalk.green(workingDir)}`);
-  } else {
-    console.log(`project created on ${chalk.green(workingDir)}`);
-  }
-
-  console.log();
-  console.log('> ', chalk.cyan('directory path has copied to clipboard 📋'));
-  console.log();
-
-  clipboardy.writeSync(workingDir);
-
-  return { templateModel, workingDir };
-}
+const cache = require('./cache')(appCacheKey);
+const TemplateModel = require('../src/TemplateModel').default;
+const createApp = require('../src/createApp').default;
+const { clearConsole } = require('../src/utils');
+const {
+  symlinkModules,
+  getYoshiModulesList,
+} = require('../../../scripts/utils/symlinkModules');
+const installExternalDependencies = require('../src/installExternalDependnecies')
+  .default;
 
 function startWatcher(workingDir, templateModel) {
   const templatePath = templateModel.getPath();
@@ -133,27 +77,120 @@ function startWatcher(workingDir, templateModel) {
     fs.removeSync(destinationPath);
     console.log(chalk.red('removed ') + chalk.cyan(destinationPath));
   });
+}
 
-  // TODO: listen to directories events
+async function askShouldContinueFromCache(cachedProjects) {
+  const abortConstant = '__new_project__';
+  let canceled;
+
+  const projectsChoices = reverse(
+    sortBy(
+      map(cachedProjects, (value, title) => {
+        const lastModified = new Date(value.lastModified);
+
+        return {
+          title: `${title}${chalk.dim.italic(
+            ` (${lastModified.toLocaleString()})`,
+          )}`,
+          value,
+        };
+      }),
+      'value.lastModified',
+    ),
+  );
+
+  clearConsole();
+
+  const response = await prompts(
+    {
+      type: 'select',
+      name: 'value',
+      message: `You can choose to continue an old session or start a new one`,
+      choices: [
+        { title: 'I want to start a new session', value: abortConstant },
+        ...projectsChoices,
+      ],
+    },
+    {
+      onCancel: () => {
+        canceled = true;
+      },
+    },
+  );
+
+  if (response.value === abortConstant || canceled) {
+    return false;
+  }
+
+  response.value.templateModel = new TemplateModel(
+    response.value.templateModel,
+  );
+
+  return response.value;
+}
+
+function upsertProjectInCache(templateModel, workingDir) {
+  const templateCacheObj = {
+    [templateModel.getTitle()]: {
+      templateModel,
+      workingDir,
+      lastModified: Date.now(),
+    },
+  };
+
+  if (!cache.has()) {
+    cache.set(templateCacheObj);
+  } else {
+    const cachedTemplates = cache.get();
+
+    cache.set({ ...cachedTemplates, ...templateCacheObj });
+  }
 }
 
 async function init() {
-  let useCache = false;
-  let cacheData;
+  let templateModel;
+  let workingDir;
+  let chosenProject;
 
-  if (cache.has(appCacheKey)) {
-    cacheData = cache.get(appCacheKey);
-    cacheData.templateModel = TemplateModel.fromJSON(cacheData.templateModel);
+  if (cache.has()) {
+    const cachedProjects = cache.get();
 
-    if (await shouldContinueOldSession(cacheData.templateModel.getTitle())) {
-      useCache = true;
-    }
+    chosenProject = await askShouldContinueFromCache(cachedProjects);
   }
 
-  const { templateModel, workingDir } = await createApp({
-    useCache,
-    cacheData,
-  });
+  if (!!chosenProject) {
+    workingDir = chosenProject.workingDir;
+    templateModel = chosenProject.templateModel;
+
+    await createApp({
+      workingDir,
+      templateModel,
+      install: false,
+      lint: false,
+    });
+  } else {
+    workingDir = path.join(tempy.directory(), 'generated');
+
+    templateModel = await createApp({
+      workingDir,
+      install: false,
+      lint: false,
+    });
+
+    const yoshiModulesList = getYoshiModulesList();
+
+    installExternalDependencies(workingDir, yoshiModulesList);
+  }
+
+  // symlink yoshi's packages
+  symlinkModules(workingDir);
+
+  upsertProjectInCache(templateModel, workingDir);
+
+  clipboardy.writeSync(workingDir);
+
+  console.log('> ', chalk.cyan('directory path has copied to clipboard 📋'));
+  console.log();
 
   startWatcher(workingDir, templateModel);
 }

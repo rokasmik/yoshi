@@ -7,7 +7,7 @@
     "module": "commonjs",
     "moduleResolution": "node",
     "importHelpers": true,
-    "target": "es5",
+    "target": "es6",
     "jsx": "react",
     "lib": ["dom", "esnext"],
     "resolveJsonModule": true
@@ -17,6 +17,7 @@
   ],
   "files": [
     "./src/external-types.d.ts",
-    "./src/server.ts"
+    "./src/server.ts",
+    "./src/config.ts"
   ]
 }

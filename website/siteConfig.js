@@ -23,8 +23,8 @@ const siteConfig = {
   ],
 
   /* path to images for header/footer */
-  headerIcon: 'img/yoshi.webp',
-  footerIcon: 'img/yoshi.webp',
+  footerIcon: 'img/yoshi.png',
+  headerIcon: 'img/yoshi.png',
   favicon: 'img/favicon.ico',
 
   // Docs will show the last update time
@@ -47,6 +47,9 @@ const siteConfig = {
   algolia: {
     apiKey: '5807169f7e8a322a659ac4145a3e5d8a',
     indexName: 'wix_yoshi',
+    algoliaOptions: {
+      facetFilters: ['version:VERSION'],
+    },
   },
 
   // Add custom scripts here that would be placed in <script> tags.
@@ -59,8 +62,8 @@ const siteConfig = {
   cleanUrl: true,
 
   // Open Graph and Twitter card images.
-  ogImage: 'img/yoshi.webp',
-  twitterImage: 'img/yoshi.webp',
+  ogImage: 'img/yoshi.png',
+  twitterImage: 'img/yoshi.png',
 };
 
 module.exports = siteConfig;

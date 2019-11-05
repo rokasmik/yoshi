@@ -8,6 +8,7 @@
   },
   "main": "dist/src/index.js",
   "module": "dist/es/src/index.js",
+  "sideEffects": false,
   "files": [
     "dist"
   ],
@@ -15,7 +16,6 @@
     "registry": "http://npm.dev.wixpress.com/"
   },
   "scripts": {
-    "start": "yoshi start",
     "precommit": "lint-staged",
     "pretest": "yoshi build",
     "test": "yoshi test",
@@ -23,13 +23,15 @@
     "release": "yoshi release"
   },
   "devDependencies": {
-    "chai": "~4.1.0",
     "husky": "~0.14.0",
     "lint-staged": "^7.2.2",
-    "yoshi": "^3.0.0"
+    "yoshi": "^4.0.0"
   },
   "lint-staged": {
     "*.js": "yoshi lint"
+  },
+  "jest": {
+    "testPathIgnorePatterns": ["<rootDir>/dist/", "<rootDir>/node_modules/"]
   },
   "yoshi": {
     "hmr": "auto"
@@ -37,10 +39,10 @@
   "module": "dist/es/src/index.js",
   "babel": {
     "presets": [
-      "yoshi"
+      ["yoshi", { "ignoreReact": true }]
     ]
   },
   "eslintConfig": {
-    "extends": "yoshi"
+    "extends": "yoshi-base"
   }
 }

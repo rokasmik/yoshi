@@ -4,8 +4,10 @@ const globby = require('globby');
 const webpack = require('webpack');
 const { isObject } = require('lodash');
 const buildUrl = require('build-url');
+const importCwd = require('import-cwd');
 const nodeExternals = require('webpack-node-externals');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
+const InterpolateHtmlPlugin = require('react-dev-utils/InterpolateHtmlPlugin');
 const { BundleAnalyzerPlugin } = require('webpack-bundle-analyzer');
 const CaseSensitivePathsPlugin = require('case-sensitive-paths-webpack-plugin');
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
@@ -20,36 +22,38 @@ const ModuleNotFoundPlugin = require('react-dev-utils/ModuleNotFoundPlugin');
 const OptimizeCSSAssetsPlugin = require('optimize-css-assets-webpack-plugin');
 const HtmlPolyfillPlugin = require('./html-polyfill-plugin');
 const { localIdentName } = require('../src/constants');
-const EnvirnmentMarkPlugin = require('../src/webpack-plugins/environment-mark-plugin');
+const EnvironmentMarkPlugin = require('../src/webpack-plugins/environment-mark-plugin');
+const ExportDefaultPlugin = require('../src/webpack-plugins/export-default-plugin');
+const rootApp = require('yoshi-config/root-app');
 const {
-  ROOT_DIR,
-  SRC_DIR,
-  BUILD_DIR,
-  STATICS_DIR,
-  TSCONFIG_FILE,
-} = require('yoshi-config/paths');
-const project = require('yoshi-config');
-const {
-  shouldDeployToCDN,
   isSingleEntry,
   isProduction: checkIsProduction,
   inTeamCity: checkInTeamCity,
   isTypescriptProject: checkIsTypescriptProject,
+  exists,
 } = require('yoshi-helpers/queries');
 const {
   tryRequire,
-  getProjectCDNBasePath,
   toIdentifier,
   getProjectArtifactId,
   createBabelConfig,
+  unprocessedModules,
 } = require('yoshi-helpers/utils');
-const { addEntry, overrideRules } = require('../src/webpack-utils');
+const {
+  addEntry,
+  overrideRules,
+  createServerEntries,
+  validateServerEntry,
+  calculatePublicPath,
+} = require('../src/webpack-utils');
+
+const { defaultEntry } = require('yoshi-helpers/constants');
 
 const reScript = /\.js?$/;
 const reStyle = /\.(css|less|scss|sass)$/;
 const reAssets = /\.(png|jpg|jpeg|gif|woff|woff2|ttf|otf|eot|wav|mp3)$/;
 
-const extensions = ['.js', '.jsx', '.ts', '.tsx', '.json'];
+const extensions = ['.mjs', '.js', '.jsx', '.ts', '.tsx', '.svelte', '.json'];
 
 const babelConfig = createBabelConfig({ modules: false });
 
@@ -63,44 +67,55 @@ const isTypescriptProject = checkIsTypescriptProject();
 
 const isDevelopment = process.env.NODE_ENV === 'development';
 
-const computedSeparateCss =
-  project.separateCss === 'prod'
-    ? inTeamCity || isProduction
-    : project.separateCss;
+const computedSeparateCss = app =>
+  app.separateCss === 'prod' ? inTeamCity || isProduction : app.separateCss;
 
 const artifactVersion = process.env.ARTIFACT_VERSION;
 
-const staticAssetName = addHashToAssetName('media/[name].[ext]');
+const sassIncludePaths = ['node_modules', 'node_modules/compass-mixins/lib'];
 
-// default public path
-let publicPath = '/';
-
-if (!inTeamCity || isDevelopment) {
-  // When on local machine or on dev environment,
-  // set the local dev-server url as the public path
-  publicPath = project.servers.cdn.url;
-}
-
-// In case we are running in CI and there is a pom.xml file, change the public path according to the path on the cdn
-// The path is created using artifactName from pom.xml and artifact version from an environment param.
-if (shouldDeployToCDN()) {
-  publicPath = getProjectCDNBasePath();
-}
-
-function exists(entry) {
-  return (
-    globby.sync(`${entry}(${extensions.join('|')})`, {
-      cwd: SRC_DIR,
-    }).length > 0
-  );
-}
-
-function addHashToAssetName(name) {
-  if (project.experimentalBuildHtml && isProduction) {
-    return name.replace('[name]', '[name].[contenthash:8]');
+function addHashToAssetName({ name, hash = 'contenthash:8', app = rootApp }) {
+  if (app.experimentalBuildHtml && isProduction) {
+    return name.replace('[name]', `[name].[${hash}]`);
   }
 
   return name;
+}
+
+function prependNameWith(filename, prefix) {
+  return filename.replace(/\.[0-9a-z]+$/i, match => `.${prefix}${match}`);
+}
+
+function createTerserPlugin(app) {
+  return new TerserPlugin({
+    // Use multi-process parallel running to improve the build speed
+    // Default number of concurrent runs: os.cpus().length - 1
+    parallel: true,
+    // Enable file caching
+    cache: true,
+    sourceMap: true,
+    terserOptions: {
+      output: {
+        // support emojis
+        ascii_only: true,
+      },
+      keep_fnames: app.keepFunctionNames,
+    },
+  });
+}
+
+function createDefinePlugin(isDebug) {
+  // https://webpack.js.org/plugins/define-plugin/
+  return new webpack.DefinePlugin({
+    'process.env.NODE_ENV': JSON.stringify(
+      isProduction ? 'production' : 'development',
+    ),
+    'process.env.IS_MINIFIED': isDebug ? 'false' : 'true',
+    'window.__CI_APP_VERSION__': JSON.stringify(
+      artifactVersion ? artifactVersion : '0.0.0',
+    ),
+    'process.env.ARTIFACT_ID': JSON.stringify(getProjectArtifactId()),
+  });
 }
 
 // NOTE ABOUT PUBLIC PATH USING UNPKG SERVICE
@@ -108,7 +123,7 @@ function addHashToAssetName(name) {
 // These projects determine their version on the "release" step, which means they will have a wrong public path
 // We currently can't support static public path of packages that deploy to unpkg
 
-const stylableSeparateCss = project.enhancedTpaStyle;
+const stylableSeparateCss = rootApp.enhancedTpaStyle;
 
 const defaultSplitChunksConfig = {
   chunks: 'all',
@@ -116,34 +131,50 @@ const defaultSplitChunksConfig = {
   minChunks: 2,
 };
 
-const useSplitChunks = project.splitChunks;
+const svelteOptions = {
+  // enables the hydrate: true runtime option, which allows a component to
+  // upgrade existing DOM rather than creating new DOM from scratch
+  hydratable: true,
+  // Supress redundant CSS warnings on development
+  // https://github.com/sveltejs/svelte-loader/issues/67
+  onwarn: (warning, onwarn) => {
+    warning.code === 'css-unused-selector' || onwarn(warning);
+  },
+  // https://github.com/ls-age/svelte-preprocess-sass
+  preprocess: {
+    style:
+      importCwd.silent('svelte-preprocess-sass') &&
+      importCwd.silent('svelte-preprocess-sass').sass({
+        includePaths: sassIncludePaths,
+      }),
+  },
+};
+
+const useSplitChunks = rootApp.splitChunks;
 
 const splitChunksConfig = isObject(useSplitChunks)
   ? useSplitChunks
   : defaultSplitChunksConfig;
 
-const entry = project.entry || project.defaultEntry;
-
-const possibleServerEntries = ['./server', '../dev/server'];
-
 // Common function to get style loaders
 const getStyleLoaders = ({
+  app = rootApp,
   embedCss,
   isDebug,
+  isHmr,
 
   // Allow overriding defaults
-  separateCss = computedSeparateCss,
-  hmr = project.hmr,
-  tpaStyle = project.tpaStyle,
+  separateCss = computedSeparateCss(app),
+  tpaStyle = app.tpaStyle,
 }) => {
   const cssLoaderOptions = {
     camelCase: true,
     sourceMap: !!separateCss,
     localIdentName: isProduction ? localIdentName.short : localIdentName.long,
     // Make sure every package has unique class names
-    hashPrefix: project.name,
+    hashPrefix: app.name,
     // https://github.com/css-modules/css-modules
-    modules: project.cssModules,
+    modules: app.cssModules,
     // PostCSS, less-loader, sass-loader and resolve-url-loader, so
     // composition will work with import
     importLoaders: 4 + Number(tpaStyle),
@@ -157,7 +188,7 @@ const getStyleLoaders = ({
         ...(embedCss
           ? [
               // https://github.com/shepherdwind/css-hot-loader
-              ...(hmr
+              ...(isHmr
                 ? [{ loader: 'yoshi-style-dependencies/css-hot-loader' }]
                 : []),
 
@@ -210,9 +241,10 @@ const getStyleLoaders = ({
                   // https://github.com/facebookincubator/create-react-app/issues/2677
                   ident: 'postcss',
                   plugins: [
+                    rootApp.experimentalRtlCss && require('postcss-rtl')(),
                     require('autoprefixer')({
                       // https://github.com/browserslist/browserslist
-                      browsers: [
+                      overrideBrowserslist: [
                         '> 0.5%',
                         'last 2 versions',
                         'Firefox ESR',
@@ -221,7 +253,7 @@ const getStyleLoaders = ({
                       ].join(','),
                       flexbox: 'no-2009',
                     }),
-                  ],
+                  ].filter(Boolean),
                   sourceMap: isDebug,
                 },
               },
@@ -263,7 +295,7 @@ const getStyleLoaders = ({
           options: {
             sourceMap: embedCss,
             implementation: tryRequire('yoshi-style-dependencies/node-sass'),
-            includePaths: ['node_modules', 'node_modules/compass-mixins/lib'],
+            includePaths: sassIncludePaths,
           },
         },
       ],
@@ -276,41 +308,50 @@ const getStyleLoaders = ({
 // client-side (client.js) and server-side (server.js) bundles
 // -----------------------------------------------------------------------------
 function createCommonWebpackConfig({
+  app = rootApp,
   isDebug = true,
   isHmr = false,
   withLocalSourceMaps,
 } = {}) {
+  const staticAssetName = addHashToAssetName({
+    name: 'media/[name].[hash:8].[ext]',
+    hash: 'hash:8',
+    app,
+  });
+
   const config = {
-    context: SRC_DIR,
+    context: app.SRC_DIR,
 
     mode: isProduction ? 'production' : 'development',
 
     output: {
-      path: STATICS_DIR,
-      publicPath,
+      path: app.STATICS_DIR,
+      publicPath: calculatePublicPath(app),
       pathinfo: isDebug,
       filename: isDebug
-        ? addHashToAssetName('[name].bundle.js')
-        : addHashToAssetName('[name].bundle.min.js'),
+        ? addHashToAssetName({ name: '[name].bundle.js', app })
+        : addHashToAssetName({ name: '[name].bundle.min.js', app }),
       chunkFilename: isDebug
-        ? addHashToAssetName('[name].chunk.js')
-        : addHashToAssetName('[name].chunk.min.js'),
+        ? addHashToAssetName({ name: '[name].chunk.js', app })
+        : addHashToAssetName({ name: '[name].chunk.min.js', app }),
       hotUpdateMainFilename: 'updates/[hash].hot-update.json',
       hotUpdateChunkFilename: 'updates/[id].[hash].hot-update.js',
     },
 
     resolve: {
-      modules: ['node_modules', SRC_DIR],
+      modules: ['node_modules', app.SRC_DIR],
 
       extensions,
 
-      alias: project.resolveAlias,
+      alias: app.resolveAlias,
+
+      mainFields: ['svelte', 'browser', 'module', 'main'],
 
       // Whether to resolve symlinks to their symlinked location.
-      symlinks: false,
+      symlinks: rootApp.experimentalMonorepo,
     },
 
-    // Since Yoshi doesn't depend on every loader it uses directly, we first look
+    // Since Yoshi does not depend on every loader it uses directly, we first look
     // for loaders in Yoshi's `node_modules` and then look at the root `node_modules`
     //
     // See https://github.com/wix/yoshi/pull/392
@@ -321,20 +362,20 @@ function createCommonWebpackConfig({
     plugins: [
       // This gives some necessary context to module not found errors, such as
       // the requesting resource
-      new ModuleNotFoundPlugin(ROOT_DIR),
+      new ModuleNotFoundPlugin(app.ROOT_DIR),
       // https://github.com/Urthen/case-sensitive-paths-webpack-plugin
       new CaseSensitivePathsPlugin(),
       // Way of communicating to `babel-preset-yoshi` or `babel-preset-wix` that
       // it should optimize for Webpack
-      new EnvirnmentMarkPlugin(),
+      new EnvironmentMarkPlugin(),
       // https://github.com/Realytics/fork-ts-checker-webpack-plugin
-      ...(isTypescriptProject && project.projectType === 'app' && isDebug
+      ...(isTypescriptProject && app.projectType === 'app' && isDebug
         ? [
             // Since `fork-ts-checker-webpack-plugin` requires you to have
             // TypeScript installed when its required, we only require it if
             // this is a TypeScript project
             new (require('fork-ts-checker-webpack-plugin'))({
-              tsconfig: TSCONFIG_FILE,
+              tsconfig: app.TSCONFIG_FILE,
               async: false,
               silent: true,
               checkSyntacticErrors: true,
@@ -351,7 +392,7 @@ function createCommonWebpackConfig({
 
       rules: [
         // https://github.com/wix/externalize-relative-module-loader
-        ...(project.features.externalizeRelativeLodash
+        ...(app.features.externalizeRelativeLodash
           ? [
               {
                 test: /[\\/]node_modules[\\/]lodash/,
@@ -361,12 +402,12 @@ function createCommonWebpackConfig({
           : []),
 
         // https://github.com/huston007/ng-annotate-loader
-        ...(project.isAngularProject
+        ...(app.isAngularProject
           ? [
               {
                 test: reScript,
                 loader: 'yoshi-angular-dependencies/ng-annotate-loader',
-                include: project.unprocessedModules,
+                include: unprocessedModules,
               },
             ]
           : []),
@@ -374,7 +415,7 @@ function createCommonWebpackConfig({
         // Rules for TS / TSX
         {
           test: /\.(ts|tsx)$/,
-          include: project.unprocessedModules,
+          include: unprocessedModules,
           use: [
             {
               loader: 'thread-loader',
@@ -384,7 +425,7 @@ function createCommonWebpackConfig({
             },
 
             // https://github.com/huston007/ng-annotate-loader
-            ...(project.isAngularProject
+            ...(app.isAngularProject
               ? [{ loader: 'yoshi-angular-dependencies/ng-annotate-loader' }]
               : []),
 
@@ -393,7 +434,7 @@ function createCommonWebpackConfig({
               options: {
                 // This implicitly sets `transpileOnly` to `true`
                 happyPackMode: true,
-                compilerOptions: project.isAngularProject
+                compilerOptions: app.isAngularProject
                   ? {}
                   : {
                       // force es modules for tree shaking
@@ -418,7 +459,7 @@ function createCommonWebpackConfig({
         // Rules for JS
         {
           test: reScript,
-          include: project.unprocessedModules,
+          include: unprocessedModules,
           use: [
             {
               loader: 'thread-loader',
@@ -453,7 +494,16 @@ function createCommonWebpackConfig({
                 test: /\.(j|t)sx?$/,
               },
               use: [
-                '@svgr/webpack',
+                {
+                  loader: '@svgr/webpack',
+                  options: {
+                    svgoConfig: {
+                      plugins: {
+                        removeViewBox: false,
+                      },
+                    },
+                  },
+                },
                 {
                   loader: 'svg-url-loader',
                   options: {
@@ -477,6 +527,14 @@ function createCommonWebpackConfig({
                   },
                 },
               ],
+            },
+
+            {
+              test: /\.carmi.js$/,
+              exclude: /node_modules/,
+              // Not installed by Yoshi and should be installed by the project that needs it.
+              // https://github.com/wix-incubator/carmi
+              loader: 'carmi/loader',
             },
 
             // Rules for Markdown
@@ -530,7 +588,7 @@ function createCommonWebpackConfig({
     },
 
     // https://webpack.js.org/configuration/devtool
-    // If we are in CI or requested explictly we create full source maps
+    // If we are in CI or requested explicitly we create full source maps
     // Once we are in a local build, we create cheap eval source map only
     // for a development build (hence the !isProduction)
     devtool:
@@ -548,18 +606,22 @@ function createCommonWebpackConfig({
 // Configuration for the client-side bundle (client.js)
 // -----------------------------------------------------------------------------
 function createClientWebpackConfig({
+  app = rootApp,
   isAnalyze = false,
   isDebug = true,
-  isHmr = false,
+  isHmr,
   withLocalSourceMaps,
 } = {}) {
   const config = createCommonWebpackConfig({
+    app,
     isDebug,
     isHmr,
     withLocalSourceMaps,
   });
 
-  const styleLoaders = getStyleLoaders({ embedCss: true, isDebug });
+  const styleLoaders = getStyleLoaders({ app, embedCss: true, isHmr, isDebug });
+
+  const entry = app.entry || defaultEntry;
 
   const clientConfig = {
     ...config,
@@ -575,22 +637,7 @@ function createClientWebpackConfig({
       // https://webpack.js.org/plugins/module-concatenation-plugin
       concatenateModules: isProduction && !disableModuleConcat,
       minimizer: [
-        new TerserPlugin({
-          // Use multi-process parallel running to improve the build speed
-          // Default number of concurrent runs: os.cpus().length - 1
-          parallel: true,
-          // Enable file caching
-          cache: true,
-          sourceMap: true,
-          terserOptions: {
-            output: {
-              // support emojis
-              ascii_only: true,
-            },
-            keep_fnames: project.keepFunctionNames,
-          },
-        }),
-
+        createTerserPlugin(app),
         // https://github.com/NMFR/optimize-css-assets-webpack-plugin
         new OptimizeCSSAssetsPlugin(),
       ],
@@ -603,40 +650,46 @@ function createClientWebpackConfig({
       ...config.output,
 
       // https://github.com/wix/yoshi/pull/497
-      jsonpFunction: `webpackJsonp_${toIdentifier(project.name)}`,
+      jsonpFunction: `webpackJsonp_${toIdentifier(app.name)}`,
 
       // Bundle as UMD format if the user configured that this is a library
-      ...(project.exports
+      ...(app.exports
         ? {
-            library: project.exports,
+            library: app.exports,
             libraryTarget: 'umd',
             globalObject: "(typeof self !== 'undefined' ? self : this)",
           }
         : {}),
 
       // https://webpack.js.org/configuration/output/#output-umdnameddefine
-      umdNamedDefine: project.umdNamedDefine,
+      umdNamedDefine: app.umdNamedDefine,
     },
 
     plugins: [
       ...config.plugins,
 
+      createDefinePlugin(isDebug),
+
       // https://github.com/jantimon/html-webpack-plugin
-      ...(project.experimentalBuildHtml
+      ...(app.experimentalBuildHtml && exists(app.TEMPLATES_DIR)
         ? [
             ...globby
-              .sync('**/*.+(ejs|vm)', { cwd: SRC_DIR, absolute: true })
+              .sync('**/*.+(ejs|vm)', {
+                cwd: app.TEMPLATES_DIR,
+                absolute: true,
+              })
               .map(templatePath => {
                 const basename = path.basename(templatePath);
+                const filename = path.resolve(
+                  app.TEMPLATES_BUILD_DIR,
+                  basename,
+                );
 
                 return new HtmlWebpackPlugin({
                   // Generate a `filename.debug.ejs` for non-minified compilation
                   filename: isDebug
-                    ? basename.replace(
-                        /\.[0-9a-z]+$/i,
-                        match => `.debug${match}`,
-                      )
-                    : basename,
+                    ? prependNameWith(filename, 'debug')
+                    : prependNameWith(filename, 'prod'),
                   // Only use chunks from the entry with the same name as the template
                   // file
                   chunks: [basename.replace(/\.[0-9a-z]+$/i, '')],
@@ -659,6 +712,10 @@ function createClientWebpackConfig({
                 },
               ),
             ]),
+
+            new InterpolateHtmlPlugin(HtmlWebpackPlugin, {
+              PUBLIC_PATH: calculatePublicPath(app),
+            }),
           ]
         : []),
 
@@ -674,21 +731,21 @@ function createClientWebpackConfig({
         minimize: !isDebug,
       }),
 
-      ...(computedSeparateCss
+      ...(computedSeparateCss(app)
         ? [
             // https://github.com/webpack-contrib/mini-css-extract-plugin
             new MiniCssExtractPlugin({
               filename: isDebug
-                ? addHashToAssetName('[name].css')
-                : addHashToAssetName('[name].min.css'),
+                ? addHashToAssetName({ name: '[name].css', app })
+                : addHashToAssetName({ name: '[name].min.css', app }),
               chunkFilename: isDebug
-                ? addHashToAssetName('[name].chunk.css')
-                : addHashToAssetName('[name].chunk.min.css'),
+                ? addHashToAssetName({ name: '[name].chunk.css', app })
+                : addHashToAssetName({ name: '[name].chunk.min.css', app }),
             }),
             // https://github.com/wix-incubator/tpa-style-webpack-plugin
-            ...(project.enhancedTpaStyle ? [new TpaStyleWebpackPlugin()] : []),
+            ...(app.enhancedTpaStyle ? [new TpaStyleWebpackPlugin()] : []),
             // https://github.com/wix/rtlcss-webpack-plugin
-            ...(!project.experimentalBuildHtml
+            ...(!app.experimentalBuildHtml && !rootApp.experimentalRtlCss
               ? [
                   new RtlCssPlugin(
                     isDebug ? '[name].rtl.css' : '[name].rtl.min.css',
@@ -697,18 +754,6 @@ function createClientWebpackConfig({
               : []),
           ]
         : []),
-
-      // https://webpack.js.org/plugins/define-plugin/
-      new webpack.DefinePlugin({
-        'process.env.NODE_ENV': JSON.stringify(
-          isProduction ? 'production' : 'development',
-        ),
-        'process.env.IS_MINIFIED': isDebug ? 'false' : 'true',
-        'window.__CI_APP_VERSION__': JSON.stringify(
-          artifactVersion ? artifactVersion : '0.0.0',
-        ),
-        'process.env.ARTIFACT_ID': JSON.stringify(getProjectArtifactId()),
-      }),
 
       // https://github.com/jmblog/how-to-optimize-momentjs-with-webpack
       new webpack.IgnorePlugin(/^\.\/locale$/, /moment$/),
@@ -724,7 +769,7 @@ function createClientWebpackConfig({
         generate: {
           runtimeStylesheetId: 'namespace',
         },
-        resolveNamespace: resolveNamespaceFactory(project.name),
+        resolveNamespace: resolveNamespaceFactory(app.name),
       }),
 
       // https://github.com/th0r/webpack-bundle-analyzer
@@ -743,17 +788,41 @@ function createClientWebpackConfig({
       rules: [
         ...config.module.rules,
 
+        {
+          test: /\.svelte$/,
+          // Both, `svelte-loader` and `svelte-preprocess-sass` should be installed
+          // by the project that needs it.
+          //
+          // If more users use `svelte` we'll consider adding it to everyone by default.
+          loader: 'svelte-loader',
+          options: {
+            ...svelteOptions,
+            dev: isDebug,
+            // https://github.com/sveltejs/svelte-loader#extracting-css
+            emitCss: true,
+          },
+        },
+
         // Rules for Style Sheets
         ...styleLoaders,
+
+        ...(app.yoshiServer
+          ? [
+              {
+                test: /\.api\.(js|ts)$/,
+                loader: require.resolve('yoshi-server-tools/loader'),
+              },
+            ]
+          : []),
       ],
     },
 
-    externals: project.externals,
+    externals: app.externals,
 
     // https://webpack.js.org/configuration/performance
     performance: {
       ...(isProduction
-        ? project.performanceBudget || { hints: false }
+        ? app.performanceBudget || { hints: false }
         : {
             hints: false,
           }),
@@ -761,9 +830,11 @@ function createClientWebpackConfig({
   };
 
   if (isHmr) {
-    addEntry(clientConfig, [
+    clientConfig.entry = addEntry(clientConfig.entry, [
       require.resolve('webpack/hot/dev-server'),
-      require.resolve('webpack-dev-server/client'),
+      // Adding the query param with the CDN URL allows HMR when working with a production site
+      // because the bundle is requested from "parastorage" we need to specify to open the socket to localhost
+      `${require.resolve('webpack-dev-server/client')}?${app.servers.cdn.url}`,
     ]);
   }
 
@@ -773,10 +844,20 @@ function createClientWebpackConfig({
 //
 // Configuration for the server-side bundle (server.js)
 // -----------------------------------------------------------------------------
-function createServerWebpackConfig({ isDebug = true, isHmr = false } = {}) {
-  const config = createCommonWebpackConfig({ isDebug, isHmr });
+function createServerWebpackConfig({
+  app = rootApp,
+  isDebug = true,
+  isHmr = false,
+  hmrPort,
+} = {}) {
+  const config = createCommonWebpackConfig({ app, isDebug, isHmr });
 
-  const styleLoaders = getStyleLoaders({ embedCss: false, isDebug });
+  const styleLoaders = getStyleLoaders({
+    app,
+    embedCss: false,
+    isHmr: false,
+    isDebug,
+  });
 
   const serverConfig = {
     ...config,
@@ -785,17 +866,26 @@ function createServerWebpackConfig({ isDebug = true, isHmr = false } = {}) {
 
     target: 'node',
 
-    entry: {
-      server: possibleServerEntries.find(exists) || possibleServerEntries[0],
+    entry: async () => {
+      const serverEntry = validateServerEntry(app, extensions);
+
+      let entryConfig = app.yoshiServer
+        ? createServerEntries(config.context, app)
+        : {};
+
+      if (serverEntry) {
+        entryConfig = { ...entryConfig, server: serverEntry };
+      }
+
+      return entryConfig;
     },
 
     output: {
       ...config.output,
-      path: BUILD_DIR,
+      path: app.BUILD_DIR,
       filename: '[name].js',
       chunkFilename: 'chunks/[name].js',
       libraryTarget: 'umd',
-      libraryExport: 'default',
       globalObject: "(typeof self !== 'undefined' ? self : this)",
       // Point sourcemap entries to original disk location (format as URL on Windows)
       devtoolModuleFilenameTemplate: info =>
@@ -812,6 +902,21 @@ function createServerWebpackConfig({ isDebug = true, isHmr = false } = {}) {
       ...config.module,
 
       rules: [
+        {
+          test: /\.svelte$/,
+          // Both, `svelte-loader` and `svelte-preprocess-sass` should be installed
+          // by the project that needs it.
+          //
+          // If more users use `svelte` we'll consider adding it to everyone by default.
+          loader: 'svelte-loader',
+          options: {
+            ...svelteOptions,
+            dev: isDebug,
+            // Generate SSR specific code
+            generate: 'ssr',
+          },
+        },
+
         ...overrideRules(config.module.rules, rule => {
           // Override paths to static assets
           if (rule.loader === 'file-loader' || rule.loader === 'url-loader') {
@@ -838,31 +943,23 @@ function createServerWebpackConfig({ isDebug = true, isHmr = false } = {}) {
             };
           }
 
-          if (rule.loader === 'ts-loader') {
-            return {
-              ...rule,
-              options: {
-                ...rule.options,
-
-                compilerOptions: project.isAngularProject
-                  ? {}
-                  : {
-                      ...rule.options.compilerOptions,
-
-                      // allow using Promises, Array.prototype.includes, String.prototype.padStart, etc.
-                      lib: ['es2017'],
-                      // use async/await instead of embedding polyfills
-                      target: 'es2017',
-                    },
-              },
-            };
-          }
-
           return rule;
         }),
 
         // Rules for Style Sheets
         ...styleLoaders,
+
+        ...(app.yoshiServer
+          ? [
+              {
+                test: /\.api\.(js|ts)$/,
+                // The loader shouldn't be applied to entry files, only to files that
+                // are imported by other files and passed to `yoshi-server/client`
+                issuer: () => true,
+                loader: require.resolve('yoshi-server-tools/loader'),
+              },
+            ]
+          : []),
       ],
     },
 
@@ -870,17 +967,42 @@ function createServerWebpackConfig({ isDebug = true, isHmr = false } = {}) {
       // Treat node modules as external for a small (and fast) server
       // bundle
       nodeExternals({
-        whitelist: [reStyle, reAssets, /bootstrap-hot-loader/],
+        whitelist: [
+          reStyle,
+          reAssets,
+          /bootstrap-hot-loader/,
+          /yoshi-server/,
+          ...(rootApp.experimentalMonorepo
+            ? require('yoshi-config/packages').libs.map(
+                lib => new RegExp(lib.name),
+              )
+            : []),
+        ],
       }),
       // Here for local integration tests as Yoshi's `node_modules`
       // are symlinked locally
       nodeExternals({
         modulesDir: path.resolve(__dirname, '../node_modules'),
       }),
-    ],
+      // Here for local integration tests as `yoshi-server` `node_modules`
+      // is symlinked locally and isn't a Yoshi dependency
+      nodeExternals({
+        modulesDir: path.resolve(__dirname, '../../yoshi-server/node_modules'),
+        whitelist: [/yoshi-server/],
+      }),
+      // Treat monorepo (hoisted) dependencies as external
+      rootApp.experimentalMonorepo &&
+        nodeExternals({
+          modulesDir: path.resolve(app.ROOT_DIR, 'node_modules'),
+        }),
+    ].filter(Boolean),
 
     plugins: [
       ...config.plugins,
+
+      // Export the server's default export (without a `default` prop) only if
+      // it exists, for backward compatibilty
+      new ExportDefaultPlugin(),
 
       // https://webpack.js.org/plugins/banner-plugin/
       new webpack.BannerPlugin({
@@ -918,15 +1040,64 @@ function createServerWebpackConfig({ isDebug = true, isHmr = false } = {}) {
   };
 
   if (isHmr) {
-    addEntry(serverConfig, [require.resolve('./hot')]);
+    serverConfig.entry = addEntry(serverConfig.entry, [
+      `${require.resolve('./hot')}?${hmrPort}`,
+    ]);
   }
 
   return serverConfig;
+}
+
+//
+// Configuration for the web-worker bundle
+// -----------------------------------------------------------------------------
+function createWebWorkerWebpackConfig({
+  app = rootApp,
+  isDebug = true,
+  isHmr = false,
+}) {
+  const config = createCommonWebpackConfig({ isDebug, isHmr });
+
+  const webWorkerConfig = {
+    ...config,
+
+    name: 'web-worker',
+
+    target: 'webworker',
+
+    entry: app.webWorkerEntry,
+
+    optimization: {
+      minimize: !isDebug,
+      // https://webpack.js.org/plugins/module-concatenation-plugin
+      concatenateModules: isProduction && !disableModuleConcat,
+      minimizer: [createTerserPlugin(app)],
+
+      // https://webpack.js.org/plugins/split-chunks-plugin
+      splitChunks: useSplitChunks ? splitChunksConfig : false,
+    },
+
+    output: {
+      ...config.output,
+
+      // Bundle as UMD format
+      library: '[name]',
+      libraryTarget: 'umd',
+      globalObject: 'self',
+    },
+
+    plugins: [...config.plugins, createDefinePlugin(isDebug)],
+
+    externals: [app.webWorkerExternals].filter(Boolean),
+  };
+
+  return webWorkerConfig;
 }
 
 module.exports = {
   createCommonWebpackConfig,
   createClientWebpackConfig,
   createServerWebpackConfig,
+  createWebWorkerWebpackConfig,
   getStyleLoaders,
 };

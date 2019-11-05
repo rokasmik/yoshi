@@ -1,6 +1,6 @@
 const findCacheDir = require('find-cache-dir');
 const fs = require('fs-extra');
-const { appCacheDirname } = require('../src/constants.js');
+const { appCacheDirname } = require('../src/constants');
 
 // '/some/path/node_modules/.cache/create-yoshi-app'
 const thunk = findCacheDir({ name: appCacheDirname, thunk: true });
@@ -12,14 +12,18 @@ const getCachePath = key => thunk(addJsonSuffix(key));
 //   fs.rmdirSync(thunk());
 // };
 
-module.exports.set = (key, obj) => {
-  fs.outputFileSync(getCachePath(key), JSON.stringify(obj));
-};
+module.exports = cacheKey => {
+  const cachePath = getCachePath(cacheKey);
 
-module.exports.get = key => {
-  return fs.readJsonSync(getCachePath(key));
-};
-
-module.exports.has = key => {
-  return fs.existsSync(getCachePath(key));
+  return {
+    set: obj => {
+      return fs.outputFileSync(cachePath, JSON.stringify(obj));
+    },
+    get: () => {
+      return fs.readJsonSync(cachePath);
+    },
+    has: () => {
+      return fs.existsSync(cachePath);
+    },
+  };
 };

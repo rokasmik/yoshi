@@ -17,8 +17,6 @@ This has a few advantages:
 
 In the future, we plan on providing many features specifically for apps. We want to encourage applications to use the new flow.
 
-Watch [Ronen's talk](https://drive.google.com/file/d/1u05-l27kSY1l6YaSqScXNe2_Hp0V7gkh/view?t=17m58s) to see how it is to work with it.
-
 ![A terminal showing the new app flow](../assets/24-app-flow.png)
 
 The purpose of this document is to explain how to opt-into this new feature. See https://github.com/wix/yoshi/pull/586 for more information on the changes it introduces.
@@ -52,9 +50,7 @@ const app = bootstrap()
 -}
 +app.express('./dist/server');
 
-app.start({
-  disableCluster: process.env.NODE_ENV !== 'production',
-});
+app.start();
 ```
 
 We use Webpack to bundle our server code and it can't handle mixing `module.exports` and ECMAScript imports in the same file. To solve it, change your `server.js` file to use EcmaScript modules for both, importing and exporting:

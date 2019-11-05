@@ -6,8 +6,10 @@ const spawn = require('cross-spawn');
 const detect = require('detect-port');
 const debounce = require('lodash/debounce');
 const waitPort = require('wait-port');
+const boxen = require('boxen');
 const { getDevelopmentEnvVars } = require('yoshi-helpers/bootstrap-utils');
 const { PORT } = require('../../constants');
+const rootApp = require('yoshi-config/root-app');
 
 let server;
 let port;
@@ -130,6 +132,27 @@ function initializeServerStartDelegate({
   };
 }
 
+const showNoServerWarning = entryPoint => {
+  console.log(
+    boxen(
+      `Yoshi could not find a server file at:\n\n` +
+        chalk.gray(`  ${entryPoint}\n\n`) +
+        chalk.grey('*') +
+        ` Using a server?     ${chalk.cyan(
+          'yoshi start --entry-point <SERVER ENTRY>',
+        )}\n\n` +
+        chalk.grey('*') +
+        ` Not using a server? ${chalk.cyan('yoshi start --no-server')}`,
+      {
+        padding: 1,
+        borderColor: 'yellow',
+        borderStyle: 'round',
+        align: 'left',
+      },
+    ),
+  );
+};
+
 module.exports = ({
   base = process.cwd(),
   entryPoint = 'index.js',
@@ -138,7 +161,7 @@ module.exports = ({
   debugBrkPort = undefined,
 } = {}) => {
   function writeToServerLog(data) {
-    fs.appendFile(path.join(base, 'target', 'server.log'), data, () => {});
+    fs.appendFile(rootApp.SERVER_LOG_FILE, data, () => {});
   }
 
   if (server && manualRestart) {
@@ -149,8 +172,7 @@ module.exports = ({
   const serverScript = path.resolve(base, entryPoint);
 
   if (!fs.existsSync(serverScript)) {
-    mkdirp.sync(path.resolve(base, 'target'));
-    writeToServerLog('no server');
+    showNoServerWarning(entryPoint);
     return Promise.resolve();
   }
 

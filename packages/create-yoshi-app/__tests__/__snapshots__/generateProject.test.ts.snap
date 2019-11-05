@@ -1,0 +1,19 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`verify generation works as expected 1`] = `
+Object {
+  ".gitignore": "",
+  "TEST_PROJECT.json": "",
+  "no-template.js": "console.log('foo');
+",
+  "package.json": "",
+  "template.txt": "test-project
+rany
+rany@wix.com
+
+TEST_PROJECT
+RANY
+RANY_WIX_COM
+",
+}
+`;

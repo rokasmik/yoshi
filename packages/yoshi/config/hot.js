@@ -1,7 +1,13 @@
+/* global __resourceQuery */
+
 if (module.hot) {
   const log = require('webpack/hot/log');
+  const SockJS = require('sockjs-client');
 
-  const checkForUpdate = function checkForUpdate(fromUpdate) {
+  const port = __resourceQuery.substr(1);
+  const socket = new SockJS(`http://localhost:${port}/_yoshi_server_hmr_`);
+
+  socket.onmessage = function checkForUpdate(fromUpdate) {
     if (module.hot.status() === 'idle') {
       module.hot
         .check(true)
@@ -17,7 +23,7 @@ if (module.hot) {
           checkForUpdate(true);
 
           // Inform the parent process (Yoshi) that HMR was successful
-          process.send({ success: true });
+          socket.send(JSON.stringify({ success: true }));
         })
         .catch(function(err) {
           const status = module.hot.status();
@@ -28,7 +34,7 @@ if (module.hot) {
 
             // Inform the parent process (Yoshi) that HMR failed and the server
             // needs to be restarted
-            process.send({ success: false });
+            socket.send(JSON.stringify({ success: false }));
           } else {
             log(
               'warning',
@@ -38,8 +44,6 @@ if (module.hot) {
         });
     }
   };
-
-  process.on('message', checkForUpdate);
 } else {
   throw new Error('[HMR] Hot Module Replacement is disabled.');
 }

@@ -14,25 +14,25 @@ This is the migration guide from v3 to v4. If you're still using Yoshi v1 or v2,
 Inside any Yoshi project, run:
 
 ```
-npm install --save-dev yoshi@next
+npm install --save-dev yoshi@4
 ```
 
 If you depend on [yoshi-style-dependencies](https://github.com/wix/yoshi/tree/version_4.x/packages/yoshi-style-dependencies), [yoshi-angular-dependencies](https://github.com/wix/yoshi/tree/version_4.x/packages/yoshi-angular-dependencies) or [jest-yoshi-preset](https://github.com/wix/yoshi/tree/version_4.x/packages/jest-yoshi-preset), make sure to bump them too:
 
 ```
-npm install --save-dev yoshi-style-dependencies@next
+npm install --save-dev yoshi-style-dependencies@4
 ```
 
 And/or:
 
 ```
-npm install --save-dev yoshi-angular-dependencies@next
+npm install --save-dev yoshi-angular-dependencies@4
 ```
 
 And/or:
 
 ```
-npm install --save-dev jest-yoshi-preset@next
+npm install --save-dev jest-yoshi-preset@4
 ```
 
 **Finally, for TypeScript projects, Yoshi now requires TypeScript with a minimum version of 2.9.0.**
@@ -43,7 +43,7 @@ Previously, every project needed to configure their own Babel presets and rules.
 
 If your project is a Babel project, please make sure to remove your `.babelrc` file.
 
-### `yoshi start` doesn't run tests by default
+### `yoshi start` does not run tests by default
 
 Jest is now the default test runner. Running its immersive watch mode along with `npm start` hides the dev server output. We recommend that you use `yoshi start` to start your local development environment and that you run your tests in a separate terminal.
 
@@ -76,18 +76,15 @@ Then, change your `tsconfig.json`:
 +    "resolveJsonModule": true,
     "..."
   },
-  "files": [
-+    "./node_modules/yoshi/types.d.ts",
-    "..."
-  ]
 }
 ```
 
-Finally, remove any old types you had on assets handled by Yoshi (normally in `src/external-types.d.ts`):
+Finally, replace old types you had on assets (normally in `src/external-types.d.ts`) to [the ones provided by Yoshi](https://github.com/wix/yoshi/blob/v4.11.1/packages/yoshi/types.d.ts):
 
 ```diff
 -declare module '*.scss';
 -declare module '*.json';
++import "yoshi/types";
 
 interface Window {
   __BASEURL__: string;
@@ -141,6 +138,8 @@ To make migration easier, please start by running a helper script, which will ch
 ```
 curl https://gist.githubusercontent.com/ronami/1608dc49efc166bb6e15a21f7073cb79/raw | node
 ```
+
+**Note:** If you're using `MATCH_ENV=component` it should be replaced with `MATCH_ENV=spec`
 
 ### Puppeteer actions in Jest have a shorter default timeout
 
