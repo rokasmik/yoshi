@@ -41,7 +41,11 @@ module.exports = class PuppeteerEnvironment extends ParentEnvironment {
   }
 
   async teardown() {
-    await this.global.page.close();
+    try {
+      await this.global.page.close();
+    } catch(e) {
+      console.warn('Browser page failed to close: ', e)
+    }
     await super.teardown();
   }
 };
