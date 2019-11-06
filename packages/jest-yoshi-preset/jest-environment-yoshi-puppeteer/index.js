@@ -41,10 +41,9 @@ module.exports = class PuppeteerEnvironment extends ParentEnvironment {
   }
 
   async teardown() {
-    try {
+    // There is an issue that the page is sometimes missing - https://github.com/wix/yoshi/issues/1642
+    if (this.global.page) {
       await this.global.page.close();
-    } catch(e) {
-      console.warn('Browser page failed to close: ', e)
     }
     await super.teardown();
   }
